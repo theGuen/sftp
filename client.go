@@ -1215,7 +1215,7 @@ func (f *File) writeToSequential(w io.Writer) (written int64, err error) {
 // This method is preferred over calling Read multiple times
 // to maximise throughput for transferring the entire file,
 // especially over high latency links.
-func (f *File) WriteTo(w io.Writer) (written int64, err error) {
+func (f *File) WriteTo(w io.Writer, fileInfo os.FileInfo) (written int64, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -1224,18 +1224,21 @@ func (f *File) WriteTo(w io.Writer) (written int64, err error) {
 	}
 
 	// For concurrency, we want to guess how many concurrent workers we should use.
-	var fileStat *FileStat
-	if f.c.useFstat {
-		fileStat, err = f.c.fstat(f.handle)
-	} else {
-		fileStat, err = f.c.stat(f.path)
-	}
-	if err != nil {
-		return 0, err
-	}
+	/*
+		var fileStat *FileStat
+		if f.c.useFstat {
+			fileStat, err = f.c.fstat(f.handle)
+		} else {
+			fileStat, err = f.c.stat(f.path)
+		}
+		if err != nil {
+			return 0, err
+		}
+	*/
+	fileSize := uint64(fileInfo.Size())
+	mode := uint32(fileInfo.Mode())
 
-	fileSize := fileStat.Size
-	if fileSize <= uint64(f.c.maxPacket) || !isRegular(fileStat.Mode) {
+	if fileSize <= uint64(f.c.maxPacket) || !isRegular(mode) {
 		// only regular files are guaranteed to return (full read) xor (partial read, next error)
 		return f.writeToSequential(w)
 	}
