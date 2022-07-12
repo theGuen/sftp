@@ -321,6 +321,23 @@ func (c *Client) Walk(root string) *fs.Walker {
 	return fs.WalkFS(root, c)
 }
 
+// FilterDir eads the directory named by dirname and returns a list of
+// directory entries filtered by the given fileFilter.
+// The filterFunction gets the filename without path and should return true to include the file in the result.
+func (c *Client) FilterDir(path string, fileFilter func(string) bool) ([]os.FileInfo, error) {
+	var ret []os.FileInfo
+	fis, err := c.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range fis {
+		if fileFilter(v.Name()) {
+			ret = append(ret, v)
+		}
+	}
+	return ret, nil
+}
+
 // ReadDir reads the directory named by dirname and returns a list of
 // directory entries.
 func (c *Client) ReadDir(p string) ([]os.FileInfo, error) {
@@ -575,6 +592,20 @@ func (c *Client) Chmod(path string, mode os.FileMode) error {
 // size greater than the current size.
 func (c *Client) Truncate(path string, size int64) error {
 	return c.setstat(path, sshFileXferAttrSize, uint64(size))
+}
+
+// OpenWithFileInfo opens the fileInfo file on the given path for reading. If successful, methods on the
+// returned file can be used for reading; the associated file descriptor
+// has mode O_RDONLY.
+func (c *Client) OpenWithFileInfo(pathOnly string, fileInfo os.FileInfo) (*File, error) {
+	fileName := fmt.Sprintf("%s/%s", pathOnly, fileInfo.Name())
+	f, err := c.open(fileName, flags(os.O_RDONLY))
+	if err != nil {
+		return nil, err
+	}
+
+	f.fi = &fileInfo
+	return f, err
 }
 
 // Open opens the named file for reading. If successful, methods on the
@@ -932,6 +963,8 @@ type File struct {
 
 	mu     sync.Mutex
 	offset int64 // current offset within remote file
+
+	fi *os.FileInfo
 }
 
 // Close closes the File, rendering it unusable for I/O. It returns an
@@ -1215,7 +1248,7 @@ func (f *File) writeToSequential(w io.Writer) (written int64, err error) {
 // This method is preferred over calling Read multiple times
 // to maximise throughput for transferring the entire file,
 // especially over high latency links.
-func (f *File) WriteTo(w io.Writer, fileInfo os.FileInfo) (written int64, err error) {
+func (f *File) WriteTo(w io.Writer) (written int64, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -1223,8 +1256,9 @@ func (f *File) WriteTo(w io.Writer, fileInfo os.FileInfo) (written int64, err er
 		return f.writeToSequential(w)
 	}
 
-	// For concurrency, we want to guess how many concurrent workers we should use.
-	/*
+	var fileSize uint64
+	var fileMode uint32
+	if f.fi == nil {
 		var fileStat *FileStat
 		if f.c.useFstat {
 			fileStat, err = f.c.fstat(f.handle)
@@ -1234,11 +1268,13 @@ func (f *File) WriteTo(w io.Writer, fileInfo os.FileInfo) (written int64, err er
 		if err != nil {
 			return 0, err
 		}
-	*/
-	fileSize := uint64(fileInfo.Size())
-	mode := uint32(fileInfo.Mode())
-
-	if fileSize <= uint64(f.c.maxPacket) || !isRegular(mode) {
+		fileSize = fileStat.Size
+		fileMode = fileStat.Mode
+	} else {
+		fileSize = uint64((*f.fi).Size())
+		fileMode = fromFileMode((*f.fi).Mode())
+	}
+	if fileSize <= uint64(f.c.maxPacket) || !isRegular(fileMode) {
 		// only regular files are guaranteed to return (full read) xor (partial read, next error)
 		return f.writeToSequential(w)
 	}
